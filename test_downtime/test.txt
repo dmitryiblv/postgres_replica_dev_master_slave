@@ -15,8 +15,8 @@ Test logic
     5) Estime downtime and amount of failed queries
 
 
-First, setup replica -> See 01_replica.txt
-       setup pgpool2 -> See 02_pgpool2.txt
+First, setup replica -> See ../01_replica.txt
+       setup pgpool2 -> See ../02_pgpool2.txt
 
 
 $ sudo su
