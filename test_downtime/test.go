@@ -33,7 +33,7 @@ func main() {
         }
     }{}
 
-    setDowntime := func() {TEST POSTGRESQL REPLICA DOWNTIME ON MASTER DOWN
+    setDowntime := func() {
         if stat.Downtime.Start == (time.Time{}) {
             stat.Downtime.Start = time.Now()
         }
