@@ -1,9 +1,9 @@
 
-==================================
+=================================================
 = 
-= TEST POSTGRESQL REPLICA DOWNTIME
+= TEST POSTGRESQL REPLICA DOWNTIME ON MASTER DOWN
 =
-==================================
+=================================================
 
 Tested at Ubuntu 24.04
 
