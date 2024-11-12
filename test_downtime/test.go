@@ -5,7 +5,7 @@ import (
     "log"
     "context"
     "database/sql"
-    "time"Create test.txt
+    "time"
     "strconv"
 
 	"github.com/uptrace/bun"
@@ -33,7 +33,7 @@ func main() {
         }
     }{}
 
-    setDowntime := func() {
+    setDowntime := func() {TEST POSTGRESQL REPLICA DOWNTIME ON MASTER DOWN
         if stat.Downtime.Start == (time.Time{}) {
             stat.Downtime.Start = time.Now()
         }
