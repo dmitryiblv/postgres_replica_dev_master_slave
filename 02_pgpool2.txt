@@ -1,0 +1,158 @@
+
+==========================
+=
+= SETUP POSTGRESQL PGPOOL2
+=
+==========================
+
+NOTE: For dev only. With docker and psql superuser.
+
+Tested at Ubuntu 24.04
+
+
+First, setup replica
+    See 01_replica.txt
+
+
+$ sudo su
+
+# mkdir -p /opt/postgres/pgpool2/etc
+# mkdir -p /opt/postgres/pgpool2/log
+
+# docker pull ubuntu:24.04
+
+Don't using docker-compose here as docker run is rather simple
+
+Run ubuntu image
+    # docker run -d -t \
+        --network=bridge \
+        -p 127.0.0.1:54320:5433 \
+        -v /opt/postgres/pgpool2/etc:/etc/pgpool2 \
+        -v /opt/postgres/pgpool2/log:/var/log/pgpool2 \
+        --name postgres-pool \
+        ubuntu:24.04
+
+Install libs
+    # docker exec -t postgres-pool bash -c "apt update"
+    # docker exec -t postgres-pool bash -c "DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt -y install tzdata"
+    # docker exec -t postgres-pool bash -c "apt install -y sudo less nano telnet net-tools iproute2 systemd rsyslog procps"
+    # docker exec -t postgres-pool bash -c "apt install -y pgpool2 postgresql-client"
+
+At Master, Slave
+    psql> CREATE ROLE pgpool WITH LOGIN SUPERUSER PASSWORD 'mypass123';
+
+# nano /opt/postgres/pgpool2/etc/pgpool.conf
+    listen_addresses = '*'
+    port = 5433
+    pcp_listen_addresses = '127.0.0.1'
+    pcp_port = 9898
+    serialize_accept = on
+    connection_cache = on
+    connect_timeout = 10000
+
+    client_min_messages = warning
+    log_min_messages = warning
+
+    sr_check_user = 'pgpool'
+    health_check_user = 'pgpool'
+    health_check_user0 = 'pgpool'
+    recovery_user = 'pgpool'
+    wd_lifecheck_user = 'pgpool'
+
+    replication_mode = off
+    load_balance_mode = off
+    master_slave_mode = off
+    health_check_period = 5
+
+    backend_hostname0 = '172.17.0.2'
+    backend_port0 = 5432
+    backend_weight0 = 1
+    backend_flag0 = ALLOW_TO_FAILOVER
+
+    backend_hostname1 = '172.17.0.3'
+    backend_port1 = 5432
+    backend_weight1 = 1
+    backend_flag1 = ALLOW_TO_FAILOVER
+
+Allow to connect from pgpool to Master, Slave
+    # docker inspect postgres-pool | grep IPAddress
+        172.17.0.4
+
+    # nano /opt/postgres/master/data/pg_hba.conf
+        -> Add to section "# IPv4 local connections:"
+        host    all             all             172.17.0.4/32           trust
+
+    # nano /opt/postgres/slave/data/pg_hba.conf
+        -> Add to section "# IPv4 local connections:"
+        host    all             all             172.17.0.4/32           trust
+
+    # docker restart postgres-master
+    # docker restart postgres-slave
+
+Setup pass for pgpool admin binaries
+    Switch terminal to Pool docker
+        # docker exec -it postgres-pool bash
+
+    In docker
+        # nano /.pcppass
+            127.0.0.1:9898:postgres:postgres
+        # chmod 600 /.pcppass
+
+Restart pgpool
+    # docker exec -t postgres-pool bash -c "pkill pgpool"
+    # docker exec postgres-pool bash -c "pgpool"
+
+    If need: run in debug mode
+        # docker exec postgres-pool bash -c "nohup pgpool -n -d >> /var/log/pgpool2/pgpool.log 2>&1 &"
+
+Check log
+    # tail /opt/postgres/pgpool2/log/pgpool.log
+
+Check access to db from Pool
+    # docker exec -it postgres-pool bash
+
+    In docker
+        # psql postgres postgres -h 172.17.0.2
+        # psql postgres postgres -h 172.17.0.3
+
+        # psql -d my_db_repl -U postgres -h 127.0.0.1 -p 5433
+        psql> SELECT * FROM test1;
+
+Check access to db from Host
+    # psql -d my_db_repl -U postgres -h 127.0.0.1 -p 54320
+
+Check pool nodes
+    # psql -d my_db_repl -U postgres -h 127.0.0.1 -p 54320 -c 'SHOW pool_nodes;' -x
+        node_id                | 0
+        hostname               | 172.17.0.2
+        port                   | 5432
+        status                 | up
+        pg_status              | up
+        lb_weight              | 0.500000
+        role                   | primary
+        pg_role                | primary
+        select_cnt             | 12
+        load_balance_node      | true
+        replication_delay      | 0
+        replication_state      |
+        replication_sync_state |
+        last_status_change     | 2024-11-11 16:26:55
+
+        node_id                | 1
+        hostname               | 172.17.0.3
+        port                   | 5432
+        status                 | up
+        pg_status              | up
+        lb_weight              | 0.500000
+        role                   | standby
+        pg_role                | primary
+        select_cnt             | 5
+        load_balance_node      | false
+        replication_delay      | 26614032
+        replication_state      |
+        replication_sync_state |
+        last_status_change     | 2024-11-11 16:25:31
+
+    OR Via pgpool admin binary
+        # docker exec -t postgres-pool bash -c 'PCPPASSFILE=/.pcppass pcp_node_info --node-id=0 -h 127.0.0.1 -p 9898 -U postgres -v -w'
+        # docker exec -t postgres-pool bash -c 'PCPPASSFILE=/.pcppass pcp_node_info --node-id=1 -h 127.0.0.1 -p 9898 -U postgres -v -w'

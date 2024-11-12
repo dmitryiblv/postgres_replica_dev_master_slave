@@ -1,0 +1,195 @@
+
+===========================================================
+=
+= SETUP POSTGRESQL MASTER-SLAVE REPLICATION (LOGICAL ASYNC)
+=
+===========================================================
+
+NOTE: For dev only. With docker and psql superuser.
+
+Tested at Ubuntu 24.04
+
+$ sudo su
+
+# mkdir -p /opt/postgres/master/data
+# mkdir -p /opt/postgres/slave/data
+
+# docker pull postgres:17.0
+
+Don't using docker-compose here as docker run is rather simple
+
+Setup Master
+    # docker run -d -t \
+        --network=bridge \
+        -v /opt/postgres/master/data:/var/lib/postgresql/data \
+        -e PGADMIN_DEFAULT_PASSWORD="postgres" \
+        -e POSTGRES_DB="postgres" \
+        -e POSTGRES_PASSWORD="postgres" \
+        -e POSTGRES_USER="postgres" \
+        --name postgres-master \
+        postgres:17.0
+
+    Install libs
+        # docker exec -t postgres-master bash -c "apt update && apt install -y sudo less nano telnet net-tools iproute2 systemd rsyslog procps"
+
+    Config
+        # nano /opt/postgres/master/data/postgresql.conf
+            log_destination = 'jsonlog'
+            logging_collector = on
+            log_filename = 'postgresql.log'
+            log_statement = 'all'
+
+    Restart postgres
+        # docker restart postgres-master
+
+    Check logs
+        # tail /opt/postgres/master/data/log/postgresql.json
+
+    Switch terminal to Master docker
+        # docker exec -it postgres-master bash
+
+    In docker
+        Check connect to db
+            # PGPASSWORD=password psql -d postgres -U postgres -h 127.0.0.1
+
+Setup Slave
+    # docker run -d -t \
+        --network=bridge \
+        -v /opt/postgres/slave/data:/var/lib/postgresql/data \
+        -e PGADMIN_DEFAULT_PASSWORD="postgres" \
+        -e POSTGRES_DB="postgres" \
+        -e POSTGRES_PASSWORD="postgres" \
+        -e POSTGRES_USER="postgres" \
+        --name postgres-slave \
+        postgres:17.0
+
+    Next
+        Same as for Master, but "master" -> "slave"
+
+Check connect between Master and Slave
+    Get ip address
+        # docker inspect postgres-master | grep IPAddress
+            172.17.0.2
+        # docker inspect postgres-slave | grep IPAddress
+            172.17.0.3
+
+    From master docker
+        # telnet 172.17.0.3 5432
+    From slave docker
+        # telnet 172.17.0.2 5432
+
+At Master
+    psql> CREATE ROLE my_role_repl WITH LOGIN SUPERUSER PASSWORD 'mypass123';
+
+    psql> CREATE DATABASE my_db_repl;
+          \c my_db_repl
+          CREATE TABLE test1 (id uuid DEFAULT gen_random_uuid() PRIMARY KEY, data TEXT);
+
+At Slave
+    psql> CREATE DATABASE my_db_repl;
+          \c my_db_repl
+          CREATE TABLE test1 (id uuid DEFAULT gen_random_uuid() PRIMARY KEY, data TEXT);
+
+Add db access from Master to Slave
+    # nano /opt/postgres/master/data/pg_hba.conf
+        -> Add to section "# IPv4 local connections:"
+        host    all             all             172.17.0.3/32           trust
+
+    # nano /opt/postgres/master/data/postgresql.conf
+        wal_level = logical
+
+    # docker restart postgres-master
+
+    # docker exec -it postgres-master bash
+
+At Master
+    psql> \c my_db_repl
+          CREATE PUBLICATION my_publ FOR ALL TABLES;
+
+    psql> SELECT * FROM pg_publication;
+            oid          | 16412
+            pubname      | my_publ
+            pubowner     | 10
+            puballtables | t
+            pubinsert    | t
+            pubupdate    | t
+            pubdelete    | t
+            pubtruncate  | t
+            pubviaroot   | f
+
+Add db access from Slave to Master
+    # nano /opt/postgres/slave/data/pg_hba.conf
+        -> Add to section "# IPv4 local connections:"
+        host    all             all             172.17.0.2/32           trust
+
+    # docker restart postgres-slave
+
+At Slave
+    Check connect to Master db
+        # PGPASSWORD=mypass123 psql -d my_db_repl -U my_role_repl -h 172.17.0.2
+
+    psql> \c my_db_repl
+          CREATE SUBSCRIPTION my_subscr CONNECTION 'dbname = my_db_repl host = 172.17.0.2 user = my_role_repl password = mypass123' PUBLICATION my_publ;
+
+    psql> SELECT * FROM pg_subscription;
+            oid                 | 16398
+            subdbid             | 16388
+            subskiplsn          | 0/0
+            subname             | my_subscr
+            subowner            | 10
+            subenabled          | t
+            subbinary           | f
+            substream           | f
+            subtwophasestate    | d
+            subdisableonerr     | f
+            subpasswordrequired | t
+            subrunasowner       | f
+            subfailover         | f
+            subconninfo         | dbname = my_db_repl host = 172.17.0.2 user = my_role_repl password = mypass123
+            subslotname         | my_subscr
+            subsynccommit       | off
+            subpublications     | {my_publ}
+            suborigin           | any
+
+At Master
+    psql> \x
+          SELECT * FROM pg_stat_replication;
+                pid              | 55
+                usesysid         | 16388
+                usename          | my_role_repl
+                application_name | my_subscr
+                client_addr      | 172.17.0.3
+                client_hostname  |
+                client_port      | 57072
+                backend_start    | 2024-11-08 17:54:55.591681+00
+                backend_xmin     |
+                state            | streaming
+                sent_lsn         | 0/1957BF0
+                write_lsn        | 0/1957BF0
+                flush_lsn        | 0/1957BF0
+                replay_lsn       | 0/1957BF0
+                write_lag        |
+                flush_lag        |
+                replay_lag       |
+                sync_priority    | 0
+                sync_state       | async
+                reply_time       | 2024-11-08 17:55:15.882688+00
+
+    psql> SELECT pg_current_wal_lsn(), pg_walfile_name( pg_current_wal_lsn() );
+            pg_current_wal_lsn | 0/1957BF0
+            pg_walfile_name    | 000000010000000000000001
+
+    psql> INSERT INTO test1 (data) VALUES ('row_1');
+          INSERT INTO test1 (data) VALUES ('row_2');
+
+At Slave
+    psql> \c my_db_repl
+          SELECT * FROM test1;
+                id                                    | data
+                --------------------------------------+-------
+                f1f186cc-3dc6-4ad8-9fd9-7aae635580a9  | row_1
+                ac5f96cc-5785-4e71-91a3-5081f0ad435e  | row_2
+
+    psql> SELECT pg_current_wal_lsn(), pg_walfile_name( pg_current_wal_lsn() );
+            pg_current_wal_lsn | 0/19568B8
+            pg_walfile_name    | 000000010000000000000001
