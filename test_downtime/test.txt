@@ -1,1 +1,197 @@
 
+==================================
+= 
+= TEST POSTGRESQL REPLICA DOWNTIME
+=
+==================================
+
+Tested at Ubuntu 24.04
+
+Test logic
+    1) Setup Master-Slave pool
+    2) Run write-read queries to the pool
+    3) Shutdown Master
+    4) Slave must be promoted to be a new master
+    5) Estime downtime and amount of failed queries
+
+
+First, setup replica -> See 01_replica.txt
+       setup pgpool2 -> See 02_pgpool2.txt
+
+
+$ sudo su
+       
+Check start time at Master
+    psql> SELECT pg_postmaster_start_time();
+            2024-11-12 12:37:55.967093+00
+
+Check start time at Slave
+    psql> SELECT pg_postmaster_start_time();
+            2024-11-12 12:37:59.967093+00
+
+Check Master-Slave are up
+    # docker exec -t postgres-pool bash -c 'PCPPASSFILE=/.pcppass pcp_node_info --node-id=0 -h 127.0.0.1 -p 9898 -U postgres -v -w'
+        Status Name            : up
+        Backend Status Name    : up
+        Role                   : primary
+        Backend Role           : primary
+        ...
+
+    # docker exec -t postgres-pool bash -c 'PCPPASSFILE=/.pcppass pcp_node_info --node-id=1 -h 127.0.0.1 -p 9898 -U postgres -v -w'
+        Status Name            : up
+        Backend Status Name    : up
+        Role                   : standby
+        Backend Role           : primary
+        ...
+
+Run test
+    Expect to be set ~100 RPS
+        test.go
+            requestLoopDelay = time.Millisecond * 10 // ~100 RPS
+
+    $ go run test.go 2>&1 | tee res.log
+
+Shutdown master
+    # docker stop postgres-master
+
+    Check master is down
+        # docker exec -t postgres-pool bash -c 'PCPPASSFILE=/.pcppass pcp_node_info --node-id=0 -h 127.0.0.1 -p 9898 -U postgres -v -w'
+            Hostname               : 172.17.0.2
+            Port                   : 5432
+            Status                 : 3
+            Weight                 : 0.500000
+            Status Name            : down
+            Backend Status Name    : down
+            Role                   : standby
+            Backend Role           : unknown
+            Replication Delay      : 0
+            Replication State      : none
+            Replication Sync State : none
+            Last Status Change     : 2024-11-12 13:25:29
+
+Check slave is promoted to be a new master
+    # docker exec -t postgres-pool bash -c 'PCPPASSFILE=/.pcppass pcp_node_info --node-id=1 -h 127.0.0.1 -p 9898 -U postgres -v -w'
+        Hostname               : 172.17.0.3
+        Port                   : 5432
+        Status                 : 2
+        Weight                 : 0.500000
+        Status Name            : up
+        Backend Status Name    : up
+        Role                   : primary
+        Backend Role           : primary
+        Replication Delay      : 0
+        Replication State      : none
+        Replication Sync State : none
+        Last Status Change     : 2024-11-12 13:25:29
+
+Stop test.go
+
+Get last log row
+    $ tail -1 res.log
+        2024/11/12 16:25:40 stat: {Connects:7 Writes:1429 Reads:1429 Rows:1429 Failed:{Connects:0 Writes:6 Reads:0} Downtime:{Start:0001-01-01 00:00:00 +0000 UTC DurationMs:0 DurationMaxMs:76}}
+
+        Failed Writes:6
+        Downtime DurationMaxMs:76
+
+    OR Check log
+        $ less res.log
+        
+        Search for "failed"
+
+        2024/11/12 16:25:29 stat: {Connects:1 Writes:292 Reads:292 Rows:292 Failed:{Connects:0 Writes:0 Reads:0} Downtime:{Start:0001-01-01 00:
+        00:00 +0000 UTC DurationMs:0 DurationMaxMs:0}}
+        2024/11/12 16:25:29 stat: {Connects:1 Writes:293 Reads:293 Rows:293 Failed:{Connects:0 Writes:0 Reads:0} Downtime:{Start:0001-01-01 00:
+        00:00 +0000 UTC DurationMs:0 DurationMaxMs:0}}
+        2024/11/12 16:25:29 stat: {Connects:1 Writes:294 Reads:294 Rows:294 Failed:{Connects:0 Writes:0 Reads:0} Downtime:{Start:0001-01-01 00:
+        00:00 +0000 UTC DurationMs:0 DurationMaxMs:0}}
+
+        -> Master is down. Request errors started.
+
+        2024/11/12 16:25:29 failed write: %!w(*errors.errorString=&{failed query: EOF
+        })
+        2024/11/12 16:25:29 stat: {Connects:1 Writes:294 Reads:294 Rows:294 Failed:{Connects:0 Writes:1 Reads:0} Downtime:{Start:2024-11-12 16:25:29.290590982 +0300 MSK m=+3.033920295 DurationMs:0 DurationMaxMs:0}}
+        2024/11/12 16:25:29 (re-)connecting
+        2024/11/12 16:25:29 failed write: %!w(*errors.errorString=&{failed query: EOF
+        })
+        2024/11/12 16:25:29 stat: {Connects:2 Writes:294 Reads:294 Rows:294 Failed:{Connects:0 Writes:2 Reads:0} Downtime:{Start:2024-11-12 16:25:29.290590982 +0300 MSK m=+3.033920295 DurationMs:41 DurationMaxMs:41}}
+        2024/11/12 16:25:29 (re-)connecting
+        2024/11/12 16:25:29 failed write: %!w(*errors.errorString=&{failed query: EOF
+        })
+        2024/11/12 16:25:29 stat: {Connects:3 Writes:294 Reads:294 Rows:294 Failed:{Connects:0 Writes:3 Reads:0} Downtime:{Start:2024-11-12 16:25:29.290590982 +0300 MSK m=+3.033920295 DurationMs:49 DurationMaxMs:49}}
+        2024/11/12 16:25:29 (re-)connecting
+        2024/11/12 16:25:29 failed write: %!w(*errors.errorString=&{failed query: EOF
+        })
+        2024/11/12 16:25:29 stat: {Connects:4 Writes:294 Reads:294 Rows:294 Failed:{Connects:0 Writes:4 Reads:0} Downtime:{Start:2024-11-12 16:25:29.290590982 +0300 MSK m=+3.033920295 DurationMs:53 DurationMaxMs:53}}
+        2024/11/12 16:25:29 (re-)connecting
+        2024/11/12 16:25:29 failed write: %!w(*errors.errorString=&{failed query: EOF
+        })
+        2024/11/12 16:25:29 stat: {Connects:5 Writes:294 Reads:294 Rows:294 Failed:{Connects:0 Writes:5 Reads:0} Downtime:{Start:2024-11-12 16:25:29.290590982 +0300 MSK m=+3.033920295 DurationMs:66 DurationMaxMs:66}}
+        2024/11/12 16:25:29 (re-)connecting
+        2024/11/12 16:25:29 failed write: %!w(*errors.errorString=&{failed query: EOF
+        })
+        2024/11/12 16:25:29 stat: {Connects:6 Writes:294 Reads:294 Rows:294 Failed:{Connects:0 Writes:6 Reads:0} Downtime:{Start:2024-11-12 16:25:29.290590982 +0300 MSK m=+3.033920295 DurationMs:76 DurationMaxMs:76}}
+        2024/11/12 16:25:29 (re-)connecting
+
+        -> Slave promoted to be a new Master. Request errors ended.
+            Failed Writes:6
+            Downtime DurationMaxMs:76
+
+        2024/11/12 16:25:29 stat: {Connects:7 Writes:295 Reads:295 Rows:295 Failed:{Connects:0 Writes:6 Reads:0} Downtime:{Start:0001-01-01 00:00:00 +0000 UTC DurationMs:0 DurationMaxMs:76}}
+        2024/11/12 16:25:29 stat: {Connects:7 Writes:296 Reads:296 Rows:296 Failed:{Connects:0 Writes:6 Reads:0} Downtime:{Start:0001-01-01 00:00:00 +0000 UTC DurationMs:0 DurationMaxMs:76}}
+        2024/11/12 16:25:29 stat: {Connects:7 Writes:297 Reads:297 Rows:297 Failed:{Connects:0 Writes:6 Reads:0} Downtime:{Start:0001-01-01 00:00:00 +0000 UTC DurationMs:0 DurationMaxMs:76}}
+
+Check start time at Master
+    psql> SELECT pg_postmaster_start_time();
+        2024-11-12 13:52:47.7297+00
+            -> Was: 2024-11-12 12:37:55.967093+00
+               I.e. new db instance started
+
+Check start time at Slave
+    psql> SELECT pg_postmaster_start_time();
+            2024-11-12 12:37:59.967093+00
+                -> Same db instance
+
+
+IF NEED: RECOVER MASTER
+
+Before attach master back it have to be fixed
+    I.e. missed data must be replicated to the master
+    Or master can be setup as a hot-standby slave
+
+Enable master again
+    # docker start postgres-master
+
+    # docker exec -t postgres-pool bash -c 'PCPPASSFILE=/.pcppass pcp_attach_node --node-id=0 -h 127.0.0.1 -p 9898 -U postgres -v -w'
+        pcp_attach_node -- Command Successful
+
+    Check
+        # psql -d my_db_repl -U postgres -h 127.0.0.1 -p 54320 -c 'SHOW pool_nodes;' -x
+            node_id                | 0
+            hostname               | 172.17.0.2
+            port                   | 5432
+            status                 | up
+            pg_status              | up
+            lb_weight              | 0.500000
+            role                   | primary
+            pg_role                | primary
+            select_cnt             | 1626
+            load_balance_node      | true
+            replication_delay      | 0
+            replication_state      |
+            replication_sync_state |
+            last_status_change     | 2024-11-12 13:53:49
+
+            node_id                | 1
+            hostname               | 172.17.0.3
+            port                   | 5432
+            status                 | up
+            pg_status              | up
+            lb_weight              | 0.500000
+            role                   | standby
+            pg_role                | primary
+            select_cnt             | 6992
+            load_balance_node      | false
+            replication_delay      | 27825008
+            replication_state      |
+            replication_sync_state |
+            last_status_change     | 2024-11-12 13:52:52
